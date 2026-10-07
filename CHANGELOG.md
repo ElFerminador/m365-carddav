@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.1
+- Fix: removed the `Strict-Transport-Security` header from port 5233. HSTS applies to the host
+  name on *all* ports, so browsers forced HTTPS on other services of the same host (e.g. the
+  Synology DSM UI on port 5000) and failed with `ERR_SSL_PROTOCOL_ERROR`.
+- Fix: admin login and invitation form failed with "Bad request" in Chrome (`Referrer-Policy: no-referrer`
+  made Chrome send `Origin: null`). Now `same-origin`; `Sec-Fetch-Site: same-origin` is accepted as well.
+
 ## 1.4.0
 - Optional admin web UI (`ADMIN_UI=true`) at `https://<host>:5233/admin`: user list with sync
   status, add user (Graph access check + invitation), new invitation, resync, delete.

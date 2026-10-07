@@ -334,7 +334,7 @@ The invitation page (`/invite/<token>`) is deliberately minimal:
   There is no login, no session, no listing, no other route.
 - Tokens have 256 bits, are valid once and for `ENROLLMENT_HOURS` (default 72); a new
   invitation replaces the previous one. Only their SHA-256 is stored (`config/invites.json`).
-- Tokens never appear in the log; responses carry `no-store`, `no-referrer`, a strict CSP and
+- Tokens never appear in the log; responses carry `no-store`, `Referrer-Policy: same-origin`, a strict CSP and
   `X-Frame-Options: DENY`; invalid tokens are answered with a delay.
 - The link is as sensitive as a password until it is used: send it to the user directly
   (e-mail to the mailbox in question, Teams chat), not to a shared channel.
@@ -367,7 +367,7 @@ therefore built defensively:
 | Brute force | Global throttle: after 5 failed logins the login is locked for 1 minute, doubling up to 15 minutes; every failure is logged. Global on purpose – behind Docker's port mapping all clients appear with the same source IP. |
 | Sessions | 256-bit random ID in a `__Host-` cookie (`Secure`, `HttpOnly`, `SameSite=Strict`), in memory only (a container restart signs everybody out); 30 min idle / 12 h absolute timeout; invalidated by `resetadminpw`. |
 | CSRF | Per-session token on every form plus `Origin` check. |
-| Output | Everything HTML-escaped, no JavaScript at all, strict CSP, `X-Frame-Options: DENY`, `no-store`, `no-referrer`. |
+| Output | Everything HTML-escaped, no JavaScript at all, strict CSP, `X-Frame-Options: DENY`, `no-store`, `Referrer-Policy: same-origin`. |
 | Audit | Logins, failed logins and every change are logged (`docker logs`), without passwords or tokens. |
 | Recovery | `docker exec -it m365-carddav resetadminpw` – requires root/docker rights on the host. |
 

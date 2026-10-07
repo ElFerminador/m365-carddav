@@ -38,12 +38,14 @@ _invite_lock = threading.Lock()
 HEADERS = {
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "no-store",
-    "Referrer-Policy": "no-referrer",
+    # same-origin (not no-referrer): with no-referrer, Chrome sends "Origin: null" on form posts
+    "Referrer-Policy": "same-origin",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Content-Security-Policy": ("default-src 'none'; style-src 'unsafe-inline'; "
                                 "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"),
-    "Strict-Transport-Security": "max-age=31536000",
+    # No Strict-Transport-Security on purpose: HSTS applies to the whole host name regardless
+    # of port and would force HTTPS on every other service of the Docker host (e.g. a NAS UI).
 }
 
 PAGE = """<!doctype html><html lang="{lang}"><head><meta charset="utf-8">
@@ -291,8 +293,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode("utf-8", "replace")).items()}
 
     def same_origin(self):
+        """Rejects cross-site form posts. Browsers set Origin / Sec-Fetch-Site themselves."""
         origin = self.headers.get("Origin")
-        return origin is None or origin == f"https://{self.headers.get('Host', '')}"
+        if origin is None or origin == f"https://{self.headers.get('Host', '')}":
+            return True
+        return self.headers.get("Sec-Fetch-Site") == "same-origin"
 
     def session(self):
         for part in self.headers.get("Cookie", "").split(";"):

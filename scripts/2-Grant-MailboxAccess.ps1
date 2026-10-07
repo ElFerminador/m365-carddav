@@ -59,7 +59,17 @@ if ($PSCmdlet.ParameterSetName -eq "Mailbox") {
     $testTargets = @($primary)
     Write-Host "Scope: mailbox $primary"
 } else {
-    $dn = (Get-Group -Identity $Group).DistinguishedName
+    $groups = @(Get-Group -Identity $Group -ErrorAction Stop)
+    if ($groups.Count -ne 1) {
+        $list = ($groups | ForEach-Object { "  $($_.Name) [$($_.RecipientTypeDetails)] $($_.DistinguishedName)" }) -join "`n"
+        throw "'$Group' matches $($groups.Count) groups - use the group's e-mail address instead:`n$list"
+    }
+    $supported = "MailUniversalSecurityGroup", "MailUniversalDistributionGroup", "GroupMailbox"
+    if ($groups[0].RecipientTypeDetails -notin $supported) {
+        throw "'$Group' is a $($groups[0].RecipientTypeDetails). RBAC for Applications only evaluates " +
+              "mail-enabled security groups, distribution lists and Microsoft 365 groups."
+    }
+    $dn = $groups[0].DistinguishedName
     $filter = "MemberOfGroup -eq '$dn'"
     $testTargets = @(Get-Recipient -RecipientTypeDetails UserMailbox -Filter $filter -ResultSize 20 |
                      ForEach-Object { $_.PrimarySmtpAddress.ToString() })
