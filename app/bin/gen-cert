@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+"""Creates key + self-signed certificate for the Entra app (Graph authentication)."""
+import datetime as dt
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
+
+from common import CER_FILE, CERT_FILE, CONF, KEY_FILE, write_private
+
+if KEY_FILE.exists() and "--force" not in sys.argv:
+    sys.exit(f"{KEY_FILE} already exists. Use --force to overwrite (then replace the certificate in Entra).")
+
+CONF.mkdir(parents=True, exist_ok=True)
+key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "m365-carddav")])
+now = dt.datetime.now(dt.timezone.utc)
+cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+        .public_key(key.public_key()).serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(minutes=5)).not_valid_after(now + dt.timedelta(days=730))
+        .sign(key, hashes.SHA256()))
+
+write_private(KEY_FILE, key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                          serialization.NoEncryption()).decode())
+CERT_FILE.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+CER_FILE.write_bytes(cert.public_bytes(serialization.Encoding.DER))
+print(f"Certificate created: {CER_FILE}")
+print(f"Thumbprint (SHA-1): {cert.fingerprint(hashes.SHA1()).hex().upper()}")
+print(f"Valid until:        {cert.not_valid_after_utc:%Y-%m-%d}")

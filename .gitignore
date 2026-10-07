@@ -1,0 +1,10 @@
+# Runtime data contains private keys and password hashes - never commit
+data/
+*.pem
+*.key
+*.cer
+*.mobileconfig
+run.sh
+__pycache__/
+*.pyc
+.DS_Store
