@@ -142,7 +142,7 @@ def instructions(user):
             f"<li>{t('mac_1')}</li><li>{t('mac_2')}</li>"
             f"<li>{t('mac_3')}<br>{t('user_name')}: <code>{e(user)}</code><br>"
             f"{t('server')}: <code>{e(carddav_url(user))}</code></li>"
-            f"<li>{t('mac_4')}</li></ol>")
+            f"<li>{t('mac_4')}</li><li>{t('mac_5')}</li></ol>")
 
 
 def invite_form(user, mailbox, error=""):

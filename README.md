@@ -265,9 +265,14 @@ System Settings → Internet Accounts → Add Account → Add Other Account → 
 | Password | from step 7 |
 | Server Address | `https://nas.example.lan:5232/alice/` |
 
-macOS warns that it cannot verify the server identity → *Show Certificate* → set *When using
-this certificate* to **Always Trust** → enter your Mac password. The address book **"M365"**
-appears in Contacts shortly after.
+If macOS warns that it cannot verify the server identity (self-signed certificate) →
+*Show Certificate* → set *When using this certificate* to **Always Trust** → enter your Mac
+password.
+
+**Rename the account:** macOS names the new account after the server URL, and that is what
+Contacts shows as group header. In System Settings → Internet Accounts, select the new account
+and change its **Description** to e.g. `M365`. (There is no terminal command for this – macOS
+offers no CLI or AppleScript access to Internet Accounts.)
 
 > **Use "Manual" with the full URL.** With *Advanced* (separate host/path/port fields) and
 > with configuration profiles (`.mobileconfig`), macOS 26 shows *"Unable to verify account

@@ -260,7 +260,10 @@ TEXTS = {
         "mac_2": "Account Type: <b>Manual</b> (not «Advanced»)",
         "mac_3": "Enter user name, the password you just set, and as server address:",
         "mac_4": "If macOS cannot verify the server identity: «Show Certificate» → "
-                 "«Always Trust». The address book «M365» appears in Contacts shortly after.",
+                 "«Always Trust».",
+        "mac_5": "macOS names the account after the server address. In System Settings → "
+                 "Internet Accounts select the new account and change its description to "
+                 "e.g. <b>M365</b> – that is the name shown in Contacts.",
         "mail": "Hello\n\nYour Microsoft 365 contacts can now be used in the macOS Contacts app.\n"
                 "Please open this link once and choose a password (it is NOT your Microsoft "
                 "365 password):\n\n{url}\n\nThe link can be used once and is valid until "
@@ -291,8 +294,10 @@ TEXTS = {
         "mac_2": "Accounttyp: <b>Manuell</b> (nicht «Erweitert»)",
         "mac_3": "Benutzername, das soeben gesetzte Passwort und als Serveradresse eintragen:",
         "mac_4": "Falls macOS die Identität des Servers nicht überprüfen kann: «Zertifikat "
-                 "einblenden» → «Immer vertrauen». Das Adressbuch «M365» erscheint kurz "
-                 "danach in Kontakte.",
+                 "einblenden» → «Immer vertrauen».",
+        "mac_5": "macOS benennt das Konto nach der Serveradresse. In Systemeinstellungen → "
+                 "Internetaccounts das neue Konto wählen und die Beschreibung z.B. auf "
+                 "<b>M365</b> ändern – so heisst es dann in Kontakte.",
         "mail": "Hallo\n\nDeine Microsoft-365-Kontakte können ab sofort in der Kontakte-App "
                 "auf dem Mac verwendet werden.\nBitte öffne einmalig diesen Link und wähle ein "
                 "Passwort (NICHT dein Microsoft-365-Passwort):\n\n{url}\n\nDer Link ist "
