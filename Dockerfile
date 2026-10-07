@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY app/ /app/
 RUN chmod 755 /app/entrypoint.sh /app/bin/*
 
-EXPOSE 5232
+EXPOSE 5232 5233
 WORKDIR /app
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/app/entrypoint.sh"]

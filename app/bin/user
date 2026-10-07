@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""Manage CardDAV users and their M365 mailboxes.
+
+  user list
+  user add <name> <mailbox> [--no-password] [--no-check]
+  user del <name> [--yes]
+  user passwd <name>     set the password yourself (admin)
+  user invite <name> [--hours N]
+                         one-time link for the user to choose the password
+                         (needs ENROLLMENT=true)
+  user sync              run a sync round now (all users)
+  user resync <name>     next round is a full resync for this user
+
+Run inside the container:  docker exec -it m365-carddav user <command>
+Changes take effect without a restart.
+"""
+import argparse
+import datetime as dt
+import getpass
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from common import (COLL_ROOT, COLLECTION, CERT_FILE, KEY_FILE, carddav_url,  # noqa: E402
+                    check_name, create_invite, del_htpasswd, delete_invites, enrollment_url,
+                    ensure_addressbook, env_bool, env_int, load_users, pending_invite,
+                    read_htpasswd, save_users, set_htpasswd, state_file, t, trigger_sync)
+
+
+def enrollment_enabled():
+    return env_bool("ENROLLMENT", False)
+
+
+def local(ts: str) -> str:
+    return dt.datetime.fromisoformat(ts).astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def invite(user, hours):
+    token, expires = create_invite(user, hours)
+    exp = local(expires.isoformat())
+    url = enrollment_url(token)
+    bar = "-" * 72
+    print(f"\nOne-time link for '{user}' (valid until {exp}, shown only now):\n\n  {url}\n")
+    print("Text to send:\n" + bar)
+    print(t("mail").format(url=url, expires=exp).rstrip())
+    print(bar)
+    if not enrollment_enabled():
+        print("WARNING: ENROLLMENT is not enabled - the link only works with "
+              "-e ENROLLMENT=true and -p 5233:5233.")
+
+
+def ask_password(user):
+    pw = getpass.getpass(f"New CardDAV password for '{user}': ")
+    if len(pw) < 12:
+        sys.exit("At least 12 characters.")
+    if pw != getpass.getpass("Repeat: "):
+        sys.exit("Passwords do not match.")
+    set_htpasswd(user, pw)
+    print(f"Password for '{user}' set.")
+
+
+def check_access(mailbox):
+    tenant, client = os.environ.get("TENANT_ID", ""), os.environ.get("CLIENT_ID", "")
+    if not (tenant and client and KEY_FILE.exists() and CERT_FILE.exists()):
+        print("Skipping access check (TENANT_ID/CLIENT_ID or Graph certificate missing).")
+        return
+    from sync import Graph  # imported lazily: needs network libs and the certificate
+    try:
+        ok, msg = Graph(tenant, client).check_access(mailbox)
+    except Exception as e:  # noqa: BLE001
+        ok, msg = False, f"check failed: {e}"
+    print(("OK: " if ok else "WARNING: ") + msg)
+
+
+def cmd_list(_):
+    users, pw = load_users(), read_htpasswd()
+    if not users:
+        print("No users configured.")
+        return
+    rows = [("USER", "MAILBOX", "PASSWORD", "LAST SYNC", "STATUS")]
+    for name in sorted(users):
+        try:
+            st = json.loads(state_file(name).read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            st = {}
+        if st.get("last_error") and st.get("last_error_at", "") >= st.get("last_sync", ""):
+            status = "ERROR: " + st["last_error"][:70]
+        else:
+            status = st.get("last_result", "never synced")
+        inv = pending_invite(name)
+        pw_state = ("yes" if name in pw else "MISSING") + (f", invite until {local(inv)}" if inv else "")
+        rows.append((name, users[name]["mailbox"], pw_state,
+                     (st.get("last_sync") or "-").replace("T", " "), status))
+    widths = [max(len(r[i]) for r in rows) for i in range(4)]
+    for r in rows:
+        print("  ".join(r[i].ljust(widths[i]) for i in range(4)) + "  " + r[4])
+
+
+def cmd_add(a):
+    name, mailbox = a.name.strip().lower(), a.mailbox.strip()
+    err = check_name("user", name)
+    if err:
+        sys.exit(err)
+    if "@" not in mailbox:
+        sys.exit("Mailbox must be an e-mail address.")
+    users = load_users()
+    if name in users:
+        sys.exit(f"User '{name}' already exists (-> {users[name]['mailbox']}).")
+    taken = [u for u, c in users.items() if c["mailbox"].lower() == mailbox.lower()]
+    if taken:
+        print(f"Note: mailbox is already mapped to '{taken[0]}'.")
+    if not a.no_check:
+        check_access(mailbox)
+    users[name] = {"mailbox": mailbox}
+    save_users(users)
+    ensure_addressbook(name)
+    print(f"User '{name}' -> {mailbox} added. Sync triggered.")
+    print(f"CardDAV URL: {carddav_url(name)}")
+    if a.no_password:
+        pass
+    elif enrollment_enabled() and not a.password:
+        invite(name, a.hours)
+    else:
+        ask_password(name)
+    trigger_sync()
+
+
+def cmd_del(a):
+    users = load_users()
+    if a.name not in users:
+        sys.exit(f"Unknown user '{a.name}'.")
+    if not a.yes:
+        answer = input(f"Delete '{a.name}' ({users[a.name]['mailbox']}) incl. its address book? [y/N] ")
+        if answer.strip().lower() not in ("y", "yes"):
+            sys.exit("Aborted.")
+    del users[a.name]
+    save_users(users)
+    del_htpasswd(a.name)
+    delete_invites(a.name)
+    shutil.rmtree(COLL_ROOT / a.name, ignore_errors=True)
+    state_file(a.name).unlink(missing_ok=True)
+    print(f"User '{a.name}' deleted. Mailbox access in Exchange is unchanged "
+          f"(remove the mailbox from the scope group if it should lose access).")
+
+
+def cmd_passwd(a):
+    if a.name not in load_users():
+        sys.exit(f"Unknown user '{a.name}'.")
+    ask_password(a.name)
+
+
+def cmd_invite(a):
+    if a.name not in load_users():
+        sys.exit(f"Unknown user '{a.name}'.")
+    invite(a.name, a.hours)
+    if a.name in read_htpasswd():
+        print("The current password stays valid until the user sets a new one.")
+
+
+def cmd_sync(_):
+    trigger_sync()
+    print("Sync round triggered (see docker logs).")
+
+
+def cmd_resync(a):
+    if a.name not in load_users():
+        sys.exit(f"Unknown user '{a.name}'.")
+    state_file(a.name).unlink(missing_ok=True)
+    trigger_sync()
+    print(f"Full resync of '{a.name}' triggered.")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="user", description="Manage CardDAV users / M365 mailboxes.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("list", help="list users and sync status").set_defaults(fn=cmd_list)
+    s = sub.add_parser("add", help="add a user")
+    s.add_argument("name", help="CardDAV login name (a-z 0-9 . _ -)")
+    s.add_argument("mailbox", help="M365 mailbox (primary SMTP address)")
+    s.add_argument("--no-password", action="store_true", help="no password / invitation now")
+    s.add_argument("--password", action="store_true",
+                   help="set the password yourself even if ENROLLMENT is enabled")
+    s.add_argument("--hours", type=int, default=env_int("ENROLLMENT_HOURS", 72),
+                   help="validity of the invitation link (default 72)")
+    s.add_argument("--no-check", action="store_true", help="skip the Graph access check")
+    s.set_defaults(fn=cmd_add)
+    s = sub.add_parser("del", help=f"delete a user and its /{COLLECTION}/ address book")
+    s.add_argument("name")
+    s.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    s.set_defaults(fn=cmd_del)
+    s = sub.add_parser("passwd", help="set a user's CardDAV password")
+    s.add_argument("name")
+    s.set_defaults(fn=cmd_passwd)
+    s = sub.add_parser("invite", help="one-time link for the user to set the password")
+    s.add_argument("name")
+    s.add_argument("--hours", type=int, default=env_int("ENROLLMENT_HOURS", 72))
+    s.set_defaults(fn=cmd_invite)
+    sub.add_parser("sync", help="run a sync round now").set_defaults(fn=cmd_sync)
+    s = sub.add_parser("resync", help="force a full resync of one user")
+    s.add_argument("name")
+    s.set_defaults(fn=cmd_resync)
+    a = p.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

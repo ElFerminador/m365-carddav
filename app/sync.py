@@ -20,8 +20,8 @@ import msal
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 
-from common import (CARDDAV_USER, CERT_FILE, COLLECTION, KEY_FILE, STATE_DIR, SYNC_SECRET,
-                    SYNC_USER, env_bool, env_int)
+from common import (CERT_FILE, COLLECTION, KEY_FILE, SYNC_SECRET, SYNC_USER, TLS_CERT, TRIGGER,
+                    env_bool, env_int, load_users, state_file)
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 PREFER = 'IdType="ImmutableId", odata.maxpagesize=200'
@@ -31,7 +31,6 @@ FIELDS = [
     "mobilePhone", "businessAddress", "homeAddress", "otherAddress", "birthday",
     "personalNotes", "businessHomePage", "categories", "lastModifiedDateTime",
 ]
-STATE_FILE = STATE_DIR / "state.json"
 log = logging.getLogger("sync")
 
 
@@ -48,7 +47,9 @@ def retry_after(resp, attempt):
 
 # --------------------------------------------------------------------------- Graph
 class Graph:
-    def __init__(self, tenant, client_id, mailbox):
+    """App-only Graph client (certificate auth), shared by all mailboxes."""
+
+    def __init__(self, tenant, client_id):
         cert = x509.load_pem_x509_certificate(CERT_FILE.read_bytes())
         self.cert_not_after = cert.not_valid_after_utc
         self.app = msal.ConfidentialClientApplication(
@@ -60,7 +61,6 @@ class Graph:
             },
         )
         self.http = httpx.Client(timeout=60)
-        self.base = f"{GRAPH}/users/{quote(mailbox)}"
 
     def _token(self):
         res = self.app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
@@ -84,6 +84,29 @@ class Graph:
             r.raise_for_status()
             return r
         raise RuntimeError("Graph: too many failed attempts")
+
+    def check_access(self, mailbox):
+        """Returns (ok, message) - used by the CLI when a user is added."""
+        r = self.http.get(f"{GRAPH}/users/{quote(mailbox)}/contacts",
+                          params={"$top": "1", "$select": "id"},
+                          headers={"Authorization": f"Bearer {self._token()}"})
+        if r.status_code == 200:
+            return True, "Graph access to the contacts of this mailbox works"
+        if r.status_code == 403:
+            return False, ("HTTP 403: the mailbox is not (yet) in the app's RBAC scope. Add it "
+                           "to the scope group / run 2-Grant-MailboxAccess.ps1; propagation can "
+                           "take up to 2 hours. The sync retries automatically.")
+        if r.status_code == 404:
+            return False, "HTTP 404: mailbox not found - check the address"
+        return False, f"HTTP {r.status_code}: {r.text[:200]}"
+
+
+class Mailbox:
+    """Graph operations for one mailbox."""
+
+    def __init__(self, graph: Graph, mailbox: str):
+        self.get = graph.get
+        self.base = f"{GRAPH}/users/{quote(mailbox)}"
 
     def default_folder_id(self):
         r = self.get(f"{self.base}/contacts", params={"$top": "1", "$select": "parentFolderId"})
@@ -191,8 +214,10 @@ def resource_name(cid: str) -> str:
 
 # --------------------------------------------------------------------------- CardDAV
 class Dav:
-    def __init__(self):
-        self.base = f"https://127.0.0.1:5232/{CARDDAV_USER}/{COLLECTION}/"
+    ROOT = "https://127.0.0.1:5232/"
+
+    def __init__(self, user):
+        self.base = f"{self.ROOT}{user}/{COLLECTION}/"
         # Loopback inside the same container: certificate is not verified
         self.http = httpx.Client(auth=(SYNC_USER, SYNC_SECRET.read_text().strip()), timeout=30,
                                  verify=False)
@@ -201,7 +226,7 @@ class Dav:
         end = time.time() + timeout
         while time.time() < end:
             try:
-                if self.http.request("PROPFIND", self.base, headers={"Depth": "0"}).status_code == 207:
+                if self.http.request("PROPFIND", self.ROOT, headers={"Depth": "0"}).status_code == 207:
                     return
             except httpx.TransportError:
                 pass
@@ -233,21 +258,22 @@ class Dav:
 
 
 # --------------------------------------------------------------------------- State
-def load_state() -> dict:
+def load_state(user) -> dict:
     try:
-        return json.loads(STATE_FILE.read_text())
+        return json.loads(state_file(user).read_text())
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
 
-def save_state(state: dict):
-    tmp = STATE_FILE.with_suffix(".tmp")
+def save_state(user, state: dict):
+    path = state_file(user)
+    tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(state))
-    os.replace(tmp, STATE_FILE)
+    os.replace(tmp, path)
 
 
 # --------------------------------------------------------------------------- Sync
-def sync_once(state, graph, dav, mailbox, full, photos):
+def sync_once(user, state, graph, dav, mailbox, full, photos):
     if state.get("mailbox") != mailbox:
         state.clear()
         state.update(mailbox=mailbox, contacts={})
@@ -304,16 +330,45 @@ def sync_once(state, graph, dav, mailbox, full, photos):
     if not delta_link:
         raise RuntimeError("Graph returned no deltaLink")
     state["delta_link"] = delta_link
-    save_state(state)
-    log.info("%s sync: %d written, %d deleted, %d unchanged, %d contacts total",
-             "Full" if full else "Delta", written, deleted, unchanged, len(contacts))
+    result = (f"{'Full' if full else 'Delta'} sync: {written} written, {deleted} deleted, "
+              f"{unchanged} unchanged, {len(contacts)} contacts total")
+    state.update(last_sync=dt.datetime.now().isoformat(timespec="seconds"), last_result=result)
+    state.pop("last_error", None)
+    save_state(user, state)
+    log.info("[%s] %s", user, result)
+
+
+def sync_user(user, mailbox, graph, photos, full_hour):
+    state = load_state(user)
+    dav = Dav(user)
+    mbx = Mailbox(graph, mailbox)
+    for _ in range(2):  # second round only after an expired delta token
+        now = dt.datetime.now()
+        full = not state.get("delta_link") or (
+            now.hour >= full_hour and state.get("last_full") != now.date().isoformat())
+        try:
+            sync_once(user, state, mbx, dav, mailbox, full, photos)
+            return
+        except DeltaGone:
+            log.warning("[%s] Delta token invalid - full resync", user)
+            state.pop("delta_link", None)
+            continue
+        except httpx.HTTPStatusError as e:
+            err = f"HTTP {e.response.status_code} at {e.request.url.path}: {e.response.text[:300]}"
+        except Exception as e:  # noqa: BLE001 - one user must never stop the others
+            log.exception("[%s] Sync failed", user)
+            err = f"{type(e).__name__}: {e}"
+        log.error("[%s] %s", user, err)
+        state.update(last_error=err, last_error_at=dt.datetime.now().isoformat(timespec="seconds"))
+        save_state(user, state)
+        return
 
 
 def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                         format="%(asctime)s %(levelname)s [sync] %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    cfg = {k: os.environ.get(k, "").strip() for k in ("TENANT_ID", "CLIENT_ID", "MAILBOX")}
+    cfg = {k: os.environ.get(k, "").strip() for k in ("TENANT_ID", "CLIENT_ID")}
     missing = [k for k, v in cfg.items() if not v]
     if missing:
         log.error("Missing environment variables: %s", ", ".join(missing))
@@ -326,35 +381,33 @@ def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.append(True))
 
-    graph = Graph(cfg["TENANT_ID"], cfg["CLIENT_ID"], cfg["MAILBOX"])
-    dav = Dav()
-    dav.wait_ready()
-    state = load_state()
-    log.info("Start: %s -> /%s/%s/, interval %ss, full sync from %02d:00, photos %s",
-             cfg["MAILBOX"], CARDDAV_USER, COLLECTION, interval, full_hour,
-             "yes" if photos else "no")
+    graph = Graph(cfg["TENANT_ID"], cfg["CLIENT_ID"])
+    Dav("-").wait_ready()
+    log.info("Start: interval %ss, full sync from %02d:00, photos %s",
+             interval, full_hour, "yes" if photos else "no")
 
     while not stop:
-        now = dt.datetime.now()
+        TRIGGER.unlink(missing_ok=True)
         days_left = (graph.cert_not_after - dt.datetime.now(dt.timezone.utc)).days
         if days_left < 30:
             log.warning("Graph certificate expires in %d days - renew it (see README)", days_left)
-        full = not state.get("delta_link") or (
-            now.hour >= full_hour and state.get("last_full") != now.date().isoformat())
         try:
-            sync_once(state, graph, dav, cfg["MAILBOX"], full, photos)
-        except DeltaGone:
-            log.warning("Delta token invalid - full resync")
-            state.pop("delta_link", None)
-            save_state(state)
-            continue
-        except httpx.HTTPStatusError as e:
-            log.error("HTTP %s bei %s: %s", e.response.status_code, e.request.url.path,
-                      e.response.text[:300])
-        except Exception:
-            log.exception("Sync failed")
-        for _ in range(interval):
+            tls_days = (x509.load_pem_x509_certificate(TLS_CERT.read_bytes()).not_valid_after_utc
+                        - dt.datetime.now(dt.timezone.utc)).days
+            if tls_days < 30:
+                log.warning("TLS certificate expires in %d days - replace tls-cert.pem and "
+                            "restart the container", tls_days)
+        except (OSError, ValueError):
+            pass
+        users = load_users()  # re-read every round: users added/removed via CLI need no restart
+        if not users:
+            log.info("No users configured (docker exec -it m365-carddav user add <name> <mailbox>)")
+        for user, cfg_user in users.items():
             if stop:
+                break
+            sync_user(user, cfg_user["mailbox"], graph, photos, full_hour)
+        for _ in range(interval):
+            if stop or TRIGGER.exists():
                 break
             time.sleep(1)
     log.info("Stopped")
