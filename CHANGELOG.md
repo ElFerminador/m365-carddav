@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.0
+- Optional admin web UI (`ADMIN_UI=true`) at `https://<host>:5233/admin`: user list with sync
+  status, add user (Graph access check + invitation), new invitation, resync, delete.
+  Initial admin password generated into a 0600 file (never logged), `resetadminpw` to renew.
+  Global login throttle, `__Host-` session cookie, CSRF tokens, no JavaScript, audit log.
+- Invitation links now use `/invite/<token>` (`/enroll/<token>` still works).
+- Stricter validation of mailbox addresses; CLI and web UI share the same user operations.
+
 ## 1.3.0
 - Optional self-service passwords: `ENROLLMENT=true` starts a minimal HTTPS endpoint on port 5233;
   `user invite <name>` (and `user add`) print a one-time link plus a ready-to-send message.

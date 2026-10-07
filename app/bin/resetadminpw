@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Generates a new password for the admin web UI and prints it once.
+
+All open admin sessions are invalidated. Run:  docker exec -it m365-carddav resetadminpw
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from common import ADMIN_INITIAL, admin_url, env_bool, reset_admin_password  # noqa: E402
+
+pw = reset_admin_password()
+ADMIN_INITIAL.unlink(missing_ok=True)
+print(f"New admin password (shown only now): {pw}")
+print(f"Admin UI: {admin_url()}  (user name: admin)")
+if not env_bool("ADMIN_UI", False):
+    print("Note: the admin UI is disabled - start the container with -e ADMIN_UI=true -p 5233:5233.")

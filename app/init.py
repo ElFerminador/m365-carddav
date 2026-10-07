@@ -16,6 +16,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from common import (COLL_ROOT, COLLECTION, CONF, KEY_FILE, CERT_FILE, TLS_CERT, TLS_CHAIN,
                     TLS_FULLCHAIN, TLS_KEY,
                     RADICALE_CONF, RIGHTS, STATE_DIR, STORAGE, SYNC_SECRET, SYNC_USER, HTPASSWD,
+                    ADMIN_FILE, ADMIN_INITIAL, admin_url, env_bool, reset_admin_password,
                     check_name, ensure_addressbook, load_users, read_htpasswd, save_users,
                     set_htpasswd, state_file, write_private)
 
@@ -240,6 +241,14 @@ permissions: r
                 f"docker exec -it m365-carddav user passwd {user}")
     if not users:
         log("No users configured yet -> docker exec -it m365-carddav user add <name> <mailbox>")
+
+    if env_bool("ADMIN_UI", False) and not ADMIN_FILE.exists():
+        write_private(ADMIN_INITIAL, reset_admin_password() + "\n")
+        log(f"Admin UI: initial password generated (not logged). Read it once with: "
+            f"docker exec m365-carddav cat {ADMIN_INITIAL} - it is deleted after the first login. "
+            f"URL: {admin_url()}")
+    elif env_bool("ADMIN_UI", False) and ADMIN_INITIAL.exists():
+        log(f"Admin UI: initial password still unused, see {ADMIN_INITIAL}")
 
     if not (KEY_FILE.exists() and CERT_FILE.exists()):
         log("ERROR: no Graph certificate found. Run 'gen-cert' first (see README).")

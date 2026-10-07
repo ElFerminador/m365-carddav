@@ -31,6 +31,7 @@ and nothing is left behind.
   no restart needed. Every user only sees their own address book.
 - **Self-service password via one-time link** (optional): the admin never sees or chooses a
   user's CardDAV password.
+- **Admin web UI** (optional) for users, invitations and sync status – or the CLI only.
 - **Certificate authentication** (no client secret, no refresh token that breaks on MFA or
   password changes).
 - **Stable keys.** Uses Graph immutable IDs as vCard `UID`; a changed address simply overwrites
@@ -104,11 +105,17 @@ This writes `data/config/graph-key.pem` (private, never leaves the host) and
 
 ### 4. Register the Entra app
 
-Copy `graph-cert.cer` to the machine where you run PowerShell, then:
+The PowerShell scripts live in the `scripts` folder of this repository. On the machine where
+you run PowerShell 7, get a copy of the repository (clone or ZIP), copy `graph-cert.cer` from
+the Docker host to that machine, then change into the folder and run step 1:
 
 ```powershell
-./scripts/1-Register-EntraApp.ps1 -CertPath ./graph-cert.cer
+cd <path-to-repository>/scripts
+./1-Register-EntraApp.ps1 -CertPath <path-to>/graph-cert.cer
 ```
+
+All script commands below assume you are in this folder. (The `./` is required: PowerShell
+does not run scripts from the current directory without it.)
 
 Note the three values printed: `TENANT_ID`, `CLIENT_ID` and `ServicePrincipalId`.
 
@@ -124,7 +131,7 @@ Note the three values printed: `TENANT_ID`, `CLIENT_ID` and `ServicePrincipalId`
 **One mailbox:**
 
 ```powershell
-./scripts/2-Grant-MailboxAccess.ps1 `
+./2-Grant-MailboxAccess.ps1 `
     -AppId <CLIENT_ID> -ServicePrincipalId <ServicePrincipalId> `
     -Mailbox user@contoso.com -AdminUpn admin@contoso.onmicrosoft.com
 ```
@@ -133,7 +140,7 @@ Note the three values printed: `TENANT_ID`, `CLIENT_ID` and `ServicePrincipalId`
 distribution list), add the users as **direct** members (nested groups are ignored), then:
 
 ```powershell
-./scripts/2-Grant-MailboxAccess.ps1 `
+./2-Grant-MailboxAccess.ps1 `
     -AppId <CLIENT_ID> -ServicePrincipalId <ServicePrincipalId> `
     -Group carddav-users@contoso.com -AdminUpn admin@contoso.onmicrosoft.com
 ```
@@ -152,6 +159,8 @@ The output must show `InScope = True` for each mailbox.
 
 ### 6. Start the container
 
+**Single user** – you set the CardDAV password yourself:
+
 ```sh
 docker run -d \
   --name m365-carddav \
@@ -168,13 +177,53 @@ docker run -d \
   m365-carddav:latest
 ```
 
-For several users, also enable the one-time links (see [Passwords](#passwords)):
-add `-p 5233:5233 -e ENROLLMENT=true -e LANGUAGE=de` (or `en`).
+**Multiple users** – managed in a web admin UI, users choose their own password via a one-time
+link (see [Admin web UI](#admin-web-ui) and [Passwords](#passwords)); same as above plus port
+5233, `ADMIN_UI` and `LANGUAGE` (`de` or `en`, for the invitation page and text):
+
+```sh
+docker run -d \
+  --name m365-carddav \
+  --restart unless-stopped \
+  --user 1027:100 \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  -p 5232:5232 \
+  -p 5233:5233 \
+  -e TZ=Europe/Zurich \
+  -e TENANT_ID=<TENANT_ID> \
+  -e CLIENT_ID=<CLIENT_ID> \
+  -e TLS_HOSTNAME=nas.example.lan \
+  -e ADMIN_UI=true \
+  -e LANGUAGE=de \
+  -v /volume1/docker/m365-carddav/data:/data \
+  m365-carddav:latest
+```
+
+Prefer the command line over a web UI? Use `-e ENROLLMENT=true` instead of `-e ADMIN_UI=true`:
+invitation links work the same, users are managed with `docker exec … user …` only.
 
 Tip: save this as `run.sh` with `docker rm -f m365-carddav 2>/dev/null` as the first line; an
 update is then just `docker build …` + `./run.sh`.
 
 ### 7. Add users
+
+**Admin web UI** (with `ADMIN_UI=true`): open `https://nas.example.lan:5233/admin`. The initial
+admin password was generated on the first start and is *not* written to the log; read it once:
+
+```sh
+docker exec m365-carddav cat /data/config/admin-initial-password.txt
+```
+
+The file is deleted after the first successful login – store the password in your password
+manager. Lost it? `docker exec -it m365-carddav resetadminpw` prints a new one and signs out all
+admin sessions.
+
+In the UI, *Add user* takes the CardDAV user name and the mailbox, checks Graph access and shows
+the one-time link plus a ready-to-send message. The table shows password/invitation state, last
+sync and errors per user; *Invite*, *Resync* and *Delete* are per row.
+
+**Command line** (always available):
 
 ```sh
 docker exec -it m365-carddav user add alice alice@contoso.com
@@ -182,8 +231,9 @@ docker exec -it m365-carddav user add alice alice@contoso.com
 
 This checks that the app can read the mailbox's contacts (warns on HTTP 403 if the RBAC
 assignment has not propagated yet – it can take up to 2 hours, the sync keeps retrying) and
-starts the first sync immediately. With `ENROLLMENT=true` it then prints a one-time link and a
-ready-to-send message for the user; without it, it asks you for the CardDAV password.
+starts the first sync immediately. With `ADMIN_UI=true` or `ENROLLMENT=true` it then prints a
+one-time link and a ready-to-send message for the user; otherwise it asks you for the CardDAV
+password.
 
 ```sh
 docker exec m365-carddav user list        # users, last sync, errors
@@ -242,11 +292,12 @@ All commands run inside the container and take effect without a restart:
 |---|---|
 | `user list` | Users, mailboxes, password set?, last sync, last error |
 | `user add <name> <mailbox>` | Add a user (checks Graph access, asks for the password, syncs now) |
-| `user invite <name> [--hours N]` | New one-time link for the user to choose a password (needs `ENROLLMENT=true`) |
+| `user invite <name> [--hours N]` | New one-time link for the user to choose a password (needs `ADMIN_UI` or `ENROLLMENT`) |
 | `user passwd <name>` | Set the CardDAV password yourself |
 | `user del <name>` | Delete the user, its password and its address book |
 | `user sync` | Run a sync round now |
 | `user resync <name>` | Throw away the sync state of one user and do a full resync |
+| `resetadminpw` | New password for the admin web UI (signs out all admin sessions) |
 
 Use `docker exec -it m365-carddav user …` (`-it` is needed for password prompts and
 confirmations). `user del` does not touch Exchange: remove the mailbox from the scope group as
@@ -265,14 +316,14 @@ mailbox from the scope group.
 
 There are two ways to set it:
 
-| | `ENROLLMENT` off (default) | `ENROLLMENT=true` |
+| | default | `ENROLLMENT=true` or `ADMIN_UI=true` |
 |---|---|---|
 | Who chooses the password | the admin (`user passwd`) | the user, via a one-time link |
 | Admin ever sees it | yes | **no** |
 | Extra listener | none | port 5233 (HTTPS) |
 | Reset / forgotten password | `user passwd` | `user invite <name>` – the old password keeps working until the new one is set |
 
-The enrollment endpoint is deliberately minimal:
+The invitation page (`/invite/<token>`) is deliberately minimal:
 
 - It can do exactly one thing: set the password of the one user an invitation was issued for.
   There is no login, no session, no listing, no other route.
@@ -285,41 +336,45 @@ The enrollment endpoint is deliberately minimal:
 
 It does **not** prove the user's identity – whoever holds the link can set the password, just
 as whoever intercepts a password could use it. For identity proof you would put Entra ID sign-in
-in front of it, which this project intentionally does not do (see below).
+in front of it, which this project does not do.
 
 If clients reach the container under a different name or port (NAT, reverse proxy), set
-`CARDDAV_URL` and `ENROLLMENT_URL` so the links and instructions are correct.
+`CARDDAV_URL` and `ENROLLMENT_URL` (base URL of port 5233) so links and instructions are
+correct.
 
-### Why a CLI and not a web admin UI?
+## Admin web UI
 
-A web UI looks more convenient, but for this project it would be the weakest point of the whole
-setup:
+Enabled with `ADMIN_UI=true`, served at `https://<host>:5233/admin` – the same port as the
+invitation links. It can list users with their sync status, add users (with Graph access check
+and invitation), issue new invitations, trigger a (full) sync and delete users. It **cannot**
+show or set a user's password and cannot change anything in Exchange.
 
-- **The admin role is worth more than every single account.** Whoever can map a CardDAV login
-  to a mailbox can read the contacts of *every* mailbox in the RBAC scope – just add yourself a
-  user pointing to the CEO's mailbox. A web login for that power is a new, high-value target on
-  the network, reachable by anyone who can reach the CardDAV port.
-- **Doing it right is a lot of security-critical code:** login and session handling, CSRF
-  protection, brute-force throttling, password storage for admins, audit logging, a separate
-  port or path, TLS for it, plus updates whenever a dependency has a vulnerability. Every
-  mistake there is a data leak; none of it adds functionality.
-- **The CLI has no attack surface of its own.** `docker exec` requires root (or docker group
-  membership) on the host. Anyone who has that can read `data/` anyway, so the CLI grants
-  nothing that was not already available – it inherits the host's access control, SSH keys,
-  MFA, logging.
-- **The target group already has it.** Whoever runs this container for several users is an
-  administrator with shell access to the Docker host. Adding a user is one command and happens
-  rarely.
-- **Leaving users out of the loop is a feature.** Granting access to a mailbox is a decision for
-  the Exchange admin (group membership); mapping it to a login is a decision for the host admin.
-  Self-service would merge both into one web form.
+### Why this needs care
 
-The optional enrollment page is not an admin UI: it cannot map logins to mailboxes, cannot see
-other users and becomes useless once its single link is used.
+The admin role is worth more than every single account: whoever can map a CardDAV login to a
+mailbox can read the contacts of *every* mailbox in the RBAC scope. And because users must reach
+port 5233 to open their invitation, the admin login is reachable from the same network. The UI is
+therefore built defensively:
 
-If a UI is needed later, it can be built on top of the same CLI/`users.json` – but it should
-then live behind existing authentication (e.g. an identity-aware proxy with Entra ID SSO),
-not with its own password form.
+| Measure | Details |
+|---|---|
+| Password | 24 random characters (144 bit), generated by the container, stored as bcrypt hash in `config/admin.passwd`. Never logged; the initial one is written to a 0600 file that is deleted after the first login. |
+| Brute force | Global throttle: after 5 failed logins the login is locked for 1 minute, doubling up to 15 minutes; every failure is logged. Global on purpose – behind Docker's port mapping all clients appear with the same source IP. |
+| Sessions | 256-bit random ID in a `__Host-` cookie (`Secure`, `HttpOnly`, `SameSite=Strict`), in memory only (a container restart signs everybody out); 30 min idle / 12 h absolute timeout; invalidated by `resetadminpw`. |
+| CSRF | Per-session token on every form plus `Origin` check. |
+| Output | Everything HTML-escaped, no JavaScript at all, strict CSP, `X-Frame-Options: DENY`, `no-store`, `no-referrer`. |
+| Audit | Logins, failed logins and every change are logged (`docker logs`), without passwords or tokens. |
+| Recovery | `docker exec -it m365-carddav resetadminpw` – requires root/docker rights on the host. |
+
+Residual risk you should be aware of:
+
+- Anyone who can reach port 5233 can *try* to log in. Do not expose 5233 (or 5232) to the
+  internet; LAN/VPN only.
+- The throttle can be abused to lock the admin out for up to 15 minutes. The command line still
+  works then.
+- No second factor. If you want one, set `ENROLLMENT=true` instead of `ADMIN_UI=true` and manage
+  users with the CLI, or put port 5233 behind an identity-aware proxy (e.g. Entra application
+  proxy, Cloudflare Access, Tailscale ACLs) – the UI works unchanged behind it.
 
 ## Configuration
 
@@ -329,11 +384,12 @@ not with its own password form.
 | `CLIENT_ID` | yes | | App (client) ID from step 4 |
 | `CARDDAV_USER` + `MAILBOX` | | | Optional single-user shortcut, creates the mapping on start (see step 7) |
 | `TLS_HOSTNAME` | yes* | | Hostname for the self-signed certificate (*not needed if you provide your own) |
-| `ENROLLMENT` | | `false` | Enable one-time password links on port 5233 |
+| `ADMIN_UI` | | `false` | Admin web UI on port 5233 (`/admin`); implies invitation links |
+| `ENROLLMENT` | | `false` | Invitation links on port 5233 without the admin UI |
 | `ENROLLMENT_HOURS` | | `72` | Validity of invitation links |
-| `LANGUAGE` | | `en` | Language of the enrollment page and invitation text (`en`, `de`) |
+| `LANGUAGE` | | `en` | Language of the invitation page and text (`en`, `de`); the admin UI is English |
 | `CARDDAV_URL` | | `https://<TLS_HOSTNAME>:5232` | Base URL clients use (shown in instructions) |
-| `ENROLLMENT_URL` | | `https://<TLS_HOSTNAME>:5233` | Base URL of the invitation links |
+| `ENROLLMENT_URL` | | `https://<TLS_HOSTNAME>:5233` | Base URL of port 5233 (invitation links, admin UI) |
 | `SYNC_INTERVAL` | | `900` | Seconds between delta syncs |
 | `FULL_SYNC_HOUR` | | `3` | Hour (container local time) of the daily full reconciliation |
 | `SYNC_PHOTOS` | | `true` | Sync contact photos |
@@ -371,6 +427,8 @@ not with its own password form.
 | `config/htpasswd`, `sync.secret` | CardDAV password hashes / internal sync password | **yes** |
 | `config/users.json` | CardDAV user → mailbox mapping | no |
 | `config/invites.json` | SHA-256 of open invitation tokens + expiry | no |
+| `config/admin.passwd` | bcrypt hash of the admin UI password | **yes** |
+| `config/admin-initial-password.txt` | Initial admin password, deleted after the first login | **yes** |
 | `config/radicale.conf`, `rights` | Regenerated on every start | no |
 | `state/<user>.json` | Delta link, per-contact hashes, last sync status | no |
 | `radicale/collections/` | The vCards | personal data |
@@ -404,7 +462,7 @@ Without further action the container creates a **self-signed** certificate for `
 (valid 825 days); every Mac has to trust it once.
 
 **Your own certificate** (e.g. from an internal CA that all your Macs already trust – no
-warnings, neither in Contacts nor on the enrollment page): put these PEM files into
+warnings, neither in Contacts nor on the invitation page and admin UI): put these PEM files into
 `data/config/` and restart the container:
 
 | File | Content | Required |
@@ -449,8 +507,9 @@ rm -rf /volume1/docker/m365-carddav
 ```
 
 ```powershell
-./scripts/Remove-MailboxAccess.ps1 -AppId <CLIENT_ID> -AdminUpn admin@contoso.onmicrosoft.com
-./scripts/Remove-EntraApp.ps1 -AppId <CLIENT_ID>
+cd <path-to-repository>/scripts
+./Remove-MailboxAccess.ps1 -AppId <CLIENT_ID> -AdminUpn admin@contoso.onmicrosoft.com
+./Remove-EntraApp.ps1 -AppId <CLIENT_ID>
 ```
 
 Remove the CardDAV account on every Mac.
@@ -469,7 +528,9 @@ Remove the CardDAV account on every Mac.
 | Invitation link: *Link not valid* | Used, expired or replaced by a newer invitation – `user invite <name>`. |
 | Container does not start: `tls-key.pem does not belong …` | Key and certificate do not match, or the leaf is not the first certificate in `tls-cert.pem`. |
 | Mac: certificate not trusted although the CA is installed | Intermediate missing → add `tls-chain.pem`. Check with `openssl s_client -connect host:5232 -showcerts`. |
-| Invitation link does not load | Port 5233 not published (`-p 5233:5233`) or `ENROLLMENT` not `true`. |
+| Invitation link / admin UI does not load | Port 5233 not published (`-p 5233:5233`), or neither `ADMIN_UI` nor `ENROLLMENT` is `true`. |
+| Admin UI: *Too many failed attempts* | Wait (max. 15 min) or use the CLI. Forgotten password: `docker exec -it m365-carddav resetadminpw`. |
+| Admin UI: *Form expired* | Session timed out (30 min idle) or the admin password was reset – reload and sign in. |
 
 ## License
 

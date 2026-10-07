@@ -21,6 +21,8 @@ RIGHTS = CONF / "rights"
 RADICALE_CONF = CONF / "radicale.conf"
 USERS_FILE = CONF / "users.json"
 INVITES_FILE = CONF / "invites.json"
+ADMIN_FILE = CONF / "admin.passwd"                    # bcrypt hash of the admin UI password
+ADMIN_INITIAL = CONF / "admin-initial-password.txt"   # deleted after the first admin login
 SYNC_SECRET = CONF / "sync.secret"
 KEY_FILE = CONF / "graph-key.pem"
 CERT_FILE = CONF / "graph-cert.pem"
@@ -142,9 +144,40 @@ def carddav_url(user: str) -> str:
     return f"{base}/{user}/"
 
 
+def web_base() -> str:
+    return os.environ.get("ENROLLMENT_URL", "").strip().rstrip("/") or f"https://{_host()}:5233"
+
+
 def enrollment_url(token: str) -> str:
-    base = os.environ.get("ENROLLMENT_URL", "").strip().rstrip("/") or f"https://{_host()}:5233"
-    return f"{base}/enroll/{token}"
+    return f"{web_base()}/invite/{token}"
+
+
+def admin_url() -> str:
+    return f"{web_base()}/admin"
+
+
+# --------------------------------------------------------------------------- admin password
+def reset_admin_password() -> str:
+    """Sets a new random admin password, returns it (in plain text, once)."""
+    pw = secrets.token_urlsafe(18)  # 24 characters, 144 bit
+    write_private(ADMIN_FILE, bcrypt.hashpw(pw.encode(), bcrypt.gensalt(12)).decode() + "\n")
+    return pw
+
+
+def verify_admin_password(pw: str) -> bool:
+    try:
+        hashed = ADMIN_FILE.read_text().strip().encode()
+    except FileNotFoundError:
+        return False
+    return bcrypt.checkpw(pw.encode()[:72], hashed)
+
+
+def admin_fingerprint() -> str:
+    """Changes whenever the admin password changes -> invalidates open sessions."""
+    try:
+        return hashlib.sha256(ADMIN_FILE.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return ""
 
 
 # --------------------------------------------------------------------------- invitations
